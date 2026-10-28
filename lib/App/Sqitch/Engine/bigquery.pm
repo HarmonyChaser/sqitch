@@ -11,7 +11,6 @@ use JSON qw(decode_json);
 use URI;
 use URI::QueryParam;
 use Try::Tiny;
-use Data::Dumper;
 use Path::Class;
 use App::Sqitch::DateTime;
 
@@ -121,7 +120,7 @@ sub _initialized {
         if (ref $result eq 'ARRAY' && @$result && exists $result->[0]->{table_exists}) {
             return ($result->[0]->{table_exists} // '') eq 'true' ? 1 : 0;
         } else {
-            warn "Unexpected result structure from _run_bq_query: " . Dumper($result);
+            $self->sqitch->debug("Unexpected result structure from _run_bq_query");
             return 0;
         }
     } catch {
@@ -272,7 +271,6 @@ sub current_state {
         $committed_raw =~ /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/;
 
     unless (defined $year) {
-        warn "Unable to parse committed_at: $committed_raw";
         hurl engine => "Invalid timestamp format in committed_at: $committed_raw";
     }
 
@@ -637,14 +635,13 @@ sub search_events {
     ) {
         my $regex = delete $p{$spec->[0]} // next;
         # Escape single quotes in regex
-        $regex =~ s/'/''/g;
-        push @wheres => "REGEXP_CONTAINS($spec->[1], r'$regex')";
+        push @wheres => "REGEXP_CONTAINS($spec->[1], " . $self->_quote($regex) . ")";
     }
 
     # Event type filter
     if (my $events = delete $p{event}) {
         my @event_list = ref $events eq 'ARRAY' ? @$events : ($events);
-        my $in_clause = join(',', map { "'$_'" } @event_list);
+        my $in_clause = join(',', map { $self->_quote($_) } @event_list);
         push @wheres => "e.event IN ($in_clause)";
     }
 
@@ -847,7 +844,6 @@ sub log_revert_change {
         $self->_run_bq_exec($sql);
         $self->sqitch->info("Reverted change: " . $change->name);
     } catch {
-        warn "log_revert_change(): Failed to remove change from registry:\nChange: " . $change->name . "\nError: $_";
         hurl engine => "Failed to revert change '$change_id': $_";
     };
 
@@ -1044,7 +1040,6 @@ sub registry_change {
 
         $self->_run_bq_exec($sql);
     } catch {
-        warn "register_change: failed to register change: $_";
         hurl engine => "Failed to register change: $_";
     };
 
@@ -1066,7 +1061,6 @@ sub registry_change {
             };
             $self->_run_bq_exec($sql);
         } catch {
-            warn "register_change: failed to register dependency (require): $_";
             hurl engine => "Failed to register dependency: $_";
         };
     }
@@ -1086,7 +1080,6 @@ sub registry_change {
             };
             $self->_run_bq_exec($sql);
         } catch {
-            warn "register_change: Failed to register dependency (conflict): $_";
             hurl engine => "Failed to register dependency: $_";
         };
     }
