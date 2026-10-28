@@ -349,6 +349,30 @@ $mock_dep->mock(_run_bq_query => sub { [ { change_exists => 'false' } ] });
 ok !$bq_with_uri->is_deployed_change(FakeChange->new), 'is_deployed_change should be false when the change is missing';
 $mock_dep->unmock_all;
 
+# Test registered_projects and current_changes (query is mocked)
+my $mock_reg = Test::MockModule->new($CLASS);
+$mock_reg->mock(_run_bq_query => sub { [ { project => 'alpha' }, { project => 'beta' } ] });
+is_deeply [$bq_with_uri->registered_projects], ['alpha', 'beta'], 'registered_projects should return the project names';
+
+$mock_reg->mock(_run_bq_query => sub { [
+    {
+        change_id => 'id1', script_hash => 'hash1', change => 'one',
+        committer_name => 'Ann', committer_email => 'ann@example.com',
+        committed_at => '2026-01-02 03:04:05',
+        planner_name => 'Bob', planner_email => 'bob@example.com',
+        planned_at => undef,
+    },
+] });
+my $iter = $bq_with_uri->current_changes('proj');
+my $row  = $iter->();
+is $row->{change}, 'one', 'current_changes should return the change name';
+isa_ok $row->{committed_at}, 'App::Sqitch::DateTime', 'committed_at';
+is $row->{committed_at}->year, 2026, 'committed_at should be parsed';
+is $row->{planned_at}, undef, 'a missing planned_at should stay undef';
+is scalar($iter->()), undef, 'the iterator should end after the last change';
+$mock_reg->unmock_all;
+
+
 ##############################################################################
 # Test 62: Test _initialized() method
 subtest '_initialized method' => sub {
