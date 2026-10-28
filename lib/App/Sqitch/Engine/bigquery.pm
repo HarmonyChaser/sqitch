@@ -282,6 +282,37 @@ sub current_state {
     };
 }
 
+# Returns an iterator over the deployed changes of a project, newest first.
+sub current_changes {
+    my ($self, $project) = @_;
+    my $project_id = $self->target->uri->host;
+    my $dataset    = $self->registry;
+    $project = $self->plan->project unless defined $project;
+    my $q_project  = $self->_quote($project);
+
+    my $sql = qq{
+        SELECT c.change_id, c.script_hash, c.change,
+               c.committer_name, c.committer_email,
+               FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', c.committed_at) AS committed_at,
+               c.planner_name, c.planner_email,
+               FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', c.planned_at) AS planned_at
+          FROM `$project_id.$dataset.changes` c
+         WHERE c.project = $q_project
+         ORDER BY c.committed_at DESC
+    };
+
+    my $rows  = $self->_run_bq_query($sql);
+    my $index = 0;
+
+    return sub {
+        return if $index >= @$rows;
+        my $row = $rows->[$index++];
+        $row->{committed_at} = $self->_parse_timestamp($row->{committed_at});
+        $row->{planned_at}   = $self->_parse_timestamp($row->{planned_at});
+        return $row;
+    };
+}
+
 sub project {
     my $self = shift;
     return $self->plan->project;
