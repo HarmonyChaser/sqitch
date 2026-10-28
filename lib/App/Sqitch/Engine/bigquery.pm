@@ -71,8 +71,21 @@ sub _capture {
     return $sqitch->capture( $self->bq, $subcommand, $self->_client_opts, @_ );
 }
 
+# Returns the registry version installed in the database, or 0 if there is none.
 sub registry_version {
-    return '1.1';
+    my $self = shift;
+    my $project_id = $self->target->uri->host;
+    my $dataset    = $self->registry;
+
+    return try {
+        my $rows = $self->_run_bq_query(
+            "SELECT MAX(version) AS version FROM `$project_id.$dataset.releases`"
+        );
+        $rows->[0]{version} // 0;
+    } catch {
+        return 0 if /Not\s+found:\s+(?:Dataset|Table)/;
+        die $_;
+    };
 }
 
 # Return the dataset name fro URI, dafaulting to 'sqitch'
