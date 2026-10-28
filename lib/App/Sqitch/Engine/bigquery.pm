@@ -313,6 +313,18 @@ sub current_changes {
     };
 }
 
+# Returns the names of the projects registered in the database, sorted.
+sub registered_projects {
+    my $self = shift;
+    my $project_id = $self->target->uri->host;
+    my $dataset    = $self->registry;
+
+    my $rows = $self->_run_bq_query(
+        "SELECT project FROM `$project_id.$dataset.projects` ORDER BY project"
+    );
+    return map { $_->{project} } @$rows;
+}
+
 sub project {
     my $self = shift;
     return $self->plan->project;
