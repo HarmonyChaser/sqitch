@@ -1702,7 +1702,7 @@ events, projects, and releases.
 
 The BigQuery engine requires a specific URI format:
 
-  bigquery://PROJECT_ID/DATASET?location=LOCATION
+  db:bigquery://PROJECT_ID/DATASET?location=LOCATION
 
 Where:
 
@@ -1710,7 +1710,8 @@ Where:
 
 =item * C<PROJECT_ID> - Your Google Cloud project ID (required)
 
-=item * C<DATASET> - The BigQuery dataset name (required)
+=item * C<DATASET> - The BigQuery dataset for your application objects. It is
+available to change scripts as C<:dataset>, and it is not the Sqitch registry.
 
 =item * C<location> - The BigQuery location/Region (required query parameter)
 
@@ -1719,9 +1720,15 @@ Where:
 Example:
 
   sqitch init myproject --engine bigquery \
-    --target bigquery://my-gcp-project/sqitch_registry?location=us-central1
+    --target db:bigquery://my-gcp-project/my_app?location=us-central1
 
 =head2 Registry Schema
+
+The registry lives in its own dataset, named by the C<registry> setting. It
+defaults to C<sqitch> and is created on the first deploy, in the location given
+in the target URI. To use another name:
+
+  sqitch config engine.bigquery.registry my_registry
 
 The BigQuery registry consists of the following tables:
 
@@ -1763,7 +1770,7 @@ The service account or user must have the following BigQuery permissions:
 
 =item * C<bigquery.dataset.get> - To check if dataset exists
 
-=item * C<bigquery.tables.create> - To create regitry tables
+=item * C<bigquery.tables.create> - To create registry tables
 
 =item * C<bigquery.tables.get> - To query table metadata
 
@@ -1781,7 +1788,7 @@ The BigQuery engine includes several optimizations to reduce API calls:
 
 =over
 
-=item * C<current_state()> - Uses a single query with LEFT JOIN to fecth the
+=item * C<current_state()> - Uses a single query with LEFT JOIN to fetch the
 latest change and its tags together
 
 =item * C<log_new_tags()> - Uses multi-row INSERT with UNNEST to add all tags
@@ -1796,24 +1803,32 @@ query
 
 =over
 
-=item * BigQuery does not support transactions, so C<begin_wor>, C<finish_work>,
+=item * BigQuery does not support transactions, so C<begin_work>, C<finish_work>,
 and C<rollback_work> are no-ops
 
 =item * The C<bq> CLI does not support variable substitution like PostgreSQL's
-C<psql>, so the engine performs manual string replacement for the C<:registry>
-placeholder
+C<psql>, so the engine replaces C<:registry> in the registry script, and
+C<:project_id>, C<:dataset> and any variables you set in change scripts, by
+itself
 
-=item * Script execution uses C<bq query> with input redirection, which may have
-limitations with very large SQL files
+=item * Each script is passed to C<bq query> as a command-line argument, which
+limits the size of a single script
+
+=item * Because there are no transactions, a deploy that fails partway can leave
+a change registered even though it did not finish. Check the registry with
+C<sqitch status> and revert the change if needed
+
+=item * Every statement runs as a separate C<bq> call, so deploys are slower
+than on engines that keep a database connection open
 
 =back
 
 =head1 Example Usage
 
-Initialize anew Sqitch project for BigQuery:
+Initialize a new Sqitch project for BigQuery:
 
   sqitch init myapp --engine bigquery \
-    --target bigquery://my-project/sqich_db?location=us-central1
+    --target db:bigquery://my-project/my_app?location=us-central1
 
 Add a change:
 
@@ -1849,7 +1864,7 @@ Tag a release:
 
 =item * L<sqitch-verify> - Verify changes in a database
 
-=item * L<sqitchApp::Sqitch::Engine> - Sqitch engine base class
+=item * L<sqitch::App::Sqitch::Engine> - Sqitch engine base class
 
 =item * L<https://cloud.google.com/bigquery/docs> - BigQuery documentation
 
@@ -1858,14 +1873,15 @@ Tag a release:
 =head1 Author
 
 Ricardo Maurino
-Based on the Sqitch engine frameworkby David E. Wheeler.
+Based on the Sqitch engine framework by David E. Wheeler.
 
 =head1 License
 
-Copyright (c) Ricardo Maurino
+Copyright (c) 2012-2025 David E. Wheeler, 2012-2021 iovation Inc.
+Copyright (c) 2026 Ricardo Maurino
 
 Permission is hereby granted, free of charge, to any person obtaining a copy 
-of this software and associated documentation files (the “Software”), to deal
+of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
@@ -1874,7 +1890,7 @@ furnished to do so, subject to the following conditions:
 The above copyright notice and this permission notice shall be included in
 all copies or substantial portions of the Software.
 
-THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
