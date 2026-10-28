@@ -25,6 +25,7 @@ use constant ENGINES => qw(
     snowflake
     cockroach
     clickhouse
+    bigquery
 );
 
 has sqitch => (
