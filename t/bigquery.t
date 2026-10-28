@@ -334,6 +334,21 @@ CONFIG: {
     is $custom_opts[5], '--location=custom-location', 'Should use configured location';
 }
 
+# Test is_deployed_change (query is mocked)
+{
+    package FakeChange;
+    sub new { bless {}, shift }
+    sub id  { 'abc123' }
+}
+my $mock_dep = Test::MockModule->new($CLASS);
+my @dep_sql;
+$mock_dep->mock(_run_bq_query => sub { push @dep_sql, $_[1]; [ { change_exists => 'true' } ] });
+ok $bq_with_uri->is_deployed_change(FakeChange->new), 'is_deployed_change should be true when the change exists';
+like $dep_sql[0], qr/change_id = 'abc123'/, 'is_deployed_change should query by change_id';
+$mock_dep->mock(_run_bq_query => sub { [ { change_exists => 'false' } ] });
+ok !$bq_with_uri->is_deployed_change(FakeChange->new), 'is_deployed_change should be false when the change is missing';
+$mock_dep->unmock_all;
+
 ##############################################################################
 # Test 62: Test _initialized() method
 subtest '_initialized method' => sub {

@@ -314,6 +314,25 @@ sub are_deployed_changes {
     return map { $_->id } grep { $seen{ $_->id } } @changes;
 }
 
+# Returns true if the change is recorded in the registry's changes table.
+sub is_deployed_change {
+    my ($self, $change) = @_;
+    my $project_id = $self->target->uri->host;
+    my $dataset    = $self->registry;
+    my $change_id  = $change->id;
+
+    my $sql = qq{
+        SELECT EXISTS(
+            SELECT 1
+              FROM `$project_id.$dataset.changes`
+             WHERE change_id = '$change_id'
+        ) AS change_exists
+    };
+
+    my $result = $self->_run_bq_query($sql);
+    return ($result->[0]{change_exists} // '') eq 'true' ? 1 : 0;
+}
+
 # load_changes
 # Loads all deployed changes from the changes table and returns them as Change objects.
 sub load_changes {
