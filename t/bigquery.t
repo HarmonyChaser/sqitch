@@ -235,7 +235,7 @@ ok my $array_to_sql = $CLASS->can('_array_to_sql'), "$CLASS->can('_array_to_sql'
 is $bq->_array_to_sql([]), '[]', 'Empty array should return []';
 is $bq->_array_to_sql(['foo']), "['foo']", 'Single element array';
 is $bq->_array_to_sql(['foo', 'bar']), "['foo', 'bar']", 'Two element array';
-is $bq->_array_to_sql(["it's", 'test']), "['it''s', 'test']", 'Should escape single quotes';
+is $bq->_array_to_sql(["it's", 'test']), "['it\\'s', 'test']", 'Should escape single quotes';
 
 # Test _parse_bq_result
 ok my $parse_result = $CLASS->can('_parse_bq_result'), "$CLASS->can('_parse_bq_result')";

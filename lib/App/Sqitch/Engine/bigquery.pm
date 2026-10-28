@@ -914,23 +914,14 @@ sub register_project {
     my $user  = $sqitch->user_name;
     my $email = $sqitch->user_email;
 
-    # Escape single quotes in values
-    my $proj_escaped  = $proj;
-    my $uri_escaped   = $uri_str;
-    my $user_escaped  = $user;
-    my $email_escaped = $email;
-
-    for my $val ($proj_escaped, $uri_escaped, $user_escaped, $email_escaped) {
-        $val =~ s/'/''/g if defined $val;
-    }
-
-    my $uri_value = defined $uri_escaped ? "'$uri_escaped'" : "NULL";
+    my ($q_proj, $q_uri, $q_user, $q_email) =
+        map { $self->_quote($_) } $proj, $uri_str, $user, $email;
 
     my $sql = qq{
         INSERT INTO $projects_table (
             project, uri, creator_name, creator_email, created_at
         ) VALUES (
-            '$proj_escaped', $uri_value, '$user_escaped', '$email_escaped', CURRENT_TIMESTAMP()
+            $q_proj, $q_uri, $q_user, $q_email, CURRENT_TIMESTAMP()
         )
     };
 
@@ -1462,7 +1453,10 @@ sub log_new_tags {
         my $planner = $tag->planner_name;
         my $planner_email = $tag->planner_email;
 
-        push @values, qq{('$tag_id', '$tag_name', '$project', '$change_id', '$note', CURRENT_TIMESTAMP(), '$user', '$email', '$planned_at', '$planner', '$planner_email')};
+        my ($q_name, $q_project, $q_note, $q_user, $q_email, $q_planner, $q_planner_email) =
+            map { $self->_quote($_) } $tag_name, $project, $note, $user, $email, $planner, $planner_email;
+
+        push @values, qq{('$tag_id', $q_name, $q_project, '$change_id', $q_note, CURRENT_TIMESTAMP(), $q_user, $q_email, '$planned_at', $q_planner, $q_planner_email)};
     }
 
     my $sql = qq{
@@ -1557,11 +1551,7 @@ sub _array_to_sql {
     return '[]' unless $array_ref && @$array_ref;
 
     # Escape single quotes in array elements
-    my @escaped = map {
-        my $val = $_;
-        $val =~ s/'/''/g;  # SQL escape: ' becomes ''
-        "'$val'"
-    } @$array_ref;
+    my @escaped = map { $self->_quote($_) } @$array_ref;
 
     return '[' . join(', ', @escaped) . ']';
 }
@@ -1606,9 +1596,7 @@ sub _log_event {
     my $planner_email  = $change->planner_email;
 
     # Escape quotes in all string fields
-    for my $field ($change_name, $project, $note, $committer_name, $committer_email, $planner_name, $planner_email) {
-        $field =~ s/'/''/g if defined $field;
-    }
+    $_ = $self->_quote($_) for $change_name, $project, $note, $committer_name, $committer_email, $planner_name, $planner_email;
 
     # Escape quotes for BigQuery - remove timezone offset
     # BigQuery TIMESTAMP() expects: 'YYYY-MM-DD HH:MM:SS' (no timezone)
@@ -1622,10 +1610,10 @@ sub _log_event {
             committed_at, committer_name, committer_email,
             planned_at, planner_name, planner_email
         ) VALUES (
-            '$event', '$change_id', '$change_name', '$project', '$note',
+            '$event', '$change_id', $change_name, $project, $note,
             $req_sql, $conf_sql, $tags_sql,
-            CURRENT_TIMESTAMP(), '$committer_name', '$committer_email',
-            TIMESTAMP('$planned_at_str'), '$planner_name', '$planner_email'
+            CURRENT_TIMESTAMP(), $committer_name, $committer_email,
+            TIMESTAMP('$planned_at_str'), $planner_name, $planner_email
             )
         };
 
