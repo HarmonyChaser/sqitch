@@ -45,11 +45,7 @@ has password => (
     isa      => Maybe[Str],
     lazy    => 1,
     default => sub {
-        my $self = shift;
-        # Skip password check for BigQuery, which use service accounts
-        return undef if $self->engine_key eq 'bigquery';
-        # Fall back to env var or URI for other engines
-	$ENV{SQITCH_PASSWORD} || $self->uri->password
+        $ENV{SQITCH_PASSWORD} || shift->uri->password
     },
 );
 
