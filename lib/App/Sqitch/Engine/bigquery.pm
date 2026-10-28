@@ -18,6 +18,7 @@ use App::Sqitch::DateTime;
 extends 'App::Sqitch::Engine';
 
 our $VERSION = '0.01';
+use constant MAX_LIMIT => 9223372036854775807;  # BigQuery needs a LIMIT before any OFFSET
 
 # Required attributes
 has 'key' => (
@@ -595,7 +596,6 @@ sub earliest_change_id {
     return undef;
 }
 
-# search_events
 # Searches the events table with various filters and returns an iterator
 # Used by sqitch log command to display deployment history
 sub search_events {
@@ -640,14 +640,13 @@ sub search_events {
         ? "\n         WHERE " . join("\n               AND ", @wheres)
         : '';
 
-    # Handle LIMIT and OFFSET
+    # Handle LIMIT and OFFSET (BigQuery allows OFFSET only after LIMIT)
+    $p{limit} = MAX_LIMIT if defined $p{offset} && !defined $p{limit};
+
     my $limits = '';
-    if (exists $p{limit}) {
-        $limits .= "\n         LIMIT " . delete $p{limit};
-    }
-    if (exists $p{offset}) {
-        $limits .= "\n         OFFSET " . delete $p{offset};
-    }  
+    $limits .= "\n         LIMIT $p{limit}"   if defined $p{limit};
+    $limits .= "\n         OFFSET $p{offset}" if defined $p{offset};
+    delete @p{qw(limit offset)};
 
     hurl 'Invalid parameters passed to search_events: '
         . join ', ', sort keys %p if %p;
