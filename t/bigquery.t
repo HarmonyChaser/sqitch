@@ -401,6 +401,29 @@ isa_ok $tag_row->{planned_at}, 'App::Sqitch::DateTime', 'tag planned_at';
 is scalar($tag_iter->()), undef, 'the tag iterator should end after the last tag';
 $mock_tags->unmock_all;
 
+# Test _change_hash, is_deployed_tag and changes_requiring_change (queries are mocked)
+my $row_hash = $bq_with_uri->_change_hash({
+    id => 'c1', name => 'one', project => 'p', note => 'n',
+    timestamp => '2026-01-02 03:04:05', planner_name => 'Ann', planner_email => 'ann@example.com',
+    script_hash => 'h', tags => 'v1 v2',
+});
+is_deeply $row_hash->{tags}, ['v1', 'v2'], '_change_hash should split the tags';
+isa_ok $row_hash->{timestamp}, 'App::Sqitch::DateTime', '_change_hash timestamp';
+is_deeply $bq_with_uri->_change_hash({ id => 'c2', tags => undef })->{tags}, [], '_change_hash should return no tags for a change without tags';
+
+my $mock_misc = Test::MockModule->new($CLASS);
+$mock_misc->mock(_run_bq_query => sub { [ { tag_exists => 'true' } ] });
+ok $bq_with_uri->is_deployed_tag(FakeChange->new), 'is_deployed_tag should be true when the tag exists';
+$mock_misc->mock(_run_bq_query => sub { [ { tag_exists => 'false' } ] });
+ok !$bq_with_uri->is_deployed_tag(FakeChange->new), 'is_deployed_tag should be false when the tag is missing';
+
+my @answers = ( [ { change_id => 'c9', project => 'p', change => 'nine' } ], [ { asof_tag => '@v2.0' } ] );
+$mock_misc->mock(_run_bq_query => sub { shift @answers });
+my @requiring = $bq_with_uri->changes_requiring_change(FakeChange->new);
+is scalar(@requiring), 1, 'changes_requiring_change should return one dependent';
+is $requiring[0]{change}, 'nine', 'changes_requiring_change should return the change name';
+is $requiring[0]{asof_tag}, '@v2.0', 'changes_requiring_change should add the as-of tag';
+$mock_misc->unmock_all;
 
 ##############################################################################
 # Test 62: Test _initialized() method

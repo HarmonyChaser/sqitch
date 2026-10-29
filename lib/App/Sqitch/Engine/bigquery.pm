@@ -478,41 +478,26 @@ sub deployed_changes_since {
 
     my $project_id = $self->target->uri->host;
     my $dataset    = $self->registry;
-    my $project    = $self->plan->project;
+    my $q_project  = $self->_quote($self->plan->project);
+    my $q_id       = $self->_quote(ref $change ? $change->id : $change);
 
-    my $change_id  = ref $change ? $change->id : $change;
+    my $rows = $self->_run_bq_query(qq{
+        SELECT c.change_id AS id, c.change AS name, c.project, c.note,
+               FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', c.planned_at) AS timestamp,
+               c.planner_name, c.planner_email, c.script_hash,
+               STRING_AGG(t.tag, ' ' ORDER BY t.tag) AS tags
+          FROM `$project_id.$dataset.changes` c
+          LEFT JOIN `$project_id.$dataset.tags` t ON c.change_id = t.change_id
+         WHERE c.project = $q_project
+           AND c.committed_at > (
+               SELECT committed_at FROM `$project_id.$dataset.changes` WHERE change_id = $q_id
+           )
+         GROUP BY c.change_id, c.change, c.project, c.note, c.planned_at,
+                  c.planner_name, c.planner_email, c.committed_at, c.script_hash
+         ORDER BY c.committed_at ASC
+    });
 
-    # Get all changes deployed after the target change
-    my $sql = qq{
-        SELECT c.change_id AS id, c.change AS name, c.project, c.note, 
-               c.planned_at AS timestamp, c.planner_name, c.planner_email,
-               c.script_hash
-        FROM `$project_id.$dataset.changes` c
-        WHERE c.project = '$project'
-          AND c.committed_at > (
-              SELECT committed_at 
-              FROM `$project_id.$dataset.changes` 
-              WHERE change_id = '$change_id' AND project = '$project'
-          )
-        ORDER BY c.committed_at ASC
-    };
-
-    my $rows = $self->_run_bq_query($sql);
-
-    # Return as hashrefs with tags
-    return map {
-        +{
-            id            => $_->{id},
-            name          => $_->{name},
-            project       => $_->{project},
-            note          => $_->{note},
-            timestamp     => $self->_parse_timestamp($_->{timestamp}),
-            planner_name  => $_->{planner_name},
-            planner_email => $_->{planner_email},
-            script_hash   => $_->{script_hash},
-            tags          => [], # Tags not retrieved here
-        }
-    } @$rows;
+    return map { $self->_change_hash($_) } @$rows;
 }
 
 # Returns the ID of the most recently deployed change.
@@ -743,35 +728,36 @@ sub log_fail_change {
 # Returns a list of changes that depend on a specified change, by querying the dependencies table in the BigQuery datase defined by the engine's configuration.
 sub changes_requiring_change {
     my ($self, $change) = @_;
-    my $change_id = $change->id;
 
-    # Build fully qualified table name
-    # Extract project and dataset from the target URI
     my $project_id = $self->target->uri->host;
     my $dataset    = $self->registry;
-    my $table      = "$project_id.$dataset.dependencies";
+    my $changes    = "`$project_id.$dataset.changes`";
+    my $tags       = "`$project_id.$dataset.tags`";
+    my $q_id       = $self->_quote($change->id);
 
-    # Construct the SQL query
-    my $sql = qq{
-        SELECT change_id
-        FROM `$table`
-        WHERE dependency_id = '$change_id'
-        ORDER BY change_id
-    };
+    my $rows = $self->_run_bq_query(qq{
+        SELECT c.change_id, c.project, c.change
+          FROM `$project_id.$dataset.dependencies` d
+          JOIN $changes c ON c.change_id = d.change_id
+         WHERE d.dependency_id = $q_id
+    });
 
-    # Run the query
-    my $results = $self->_run_bq_query($sql);
-
-    # Parse results into Change objects
-    my @changes;
-    for my $row (@$results) {
-        push @changes, App::Sqitch::Plan::Change->new(
-            id   => $row->{change_id},
-            plan => $self->plan,
-        );
+    # Add the first tag applied at or after each dependent change (asof_tag).
+    for my $row (@$rows) {
+        my $q_cid = $self->_quote($row->{change_id});
+        my $tag_rows = $self->_run_bq_query(qq{
+            SELECT CONCAT('\@', t.tag) AS asof_tag
+              FROM $changes c2
+              JOIN $tags t ON c2.change_id = t.change_id
+             WHERE c2.project = (SELECT project FROM $changes WHERE change_id = $q_cid)
+               AND c2.committed_at >= (SELECT committed_at FROM $changes WHERE change_id = $q_cid)
+             ORDER BY c2.committed_at ASC, t.tag ASC
+             LIMIT 1
+        });
+        $row->{asof_tag} = $tag_rows->[0]{asof_tag};
     }
 
-    return @changes;
+    return @$rows;
 }
 
 # Removes a deployed change from the Sqitch registry by deleting its record from the changes table.
@@ -1391,25 +1377,21 @@ sub current_tags {
     };
 }
 
-
 # Check if a tag is deployed
 sub is_deployed_tag {
     my ($self, $tag) = @_;
 
     my $project_id = $self->target->uri->host;
     my $dataset    = $self->registry;
-    my $project    = $self->plan->project;
+    my $q_id       = $self->_quote($tag->id);
 
-    my $tag_name = ref $tag ? $tag->name : $tag;
+    my $rows = $self->_run_bq_query(qq{
+        SELECT EXISTS(
+            SELECT 1 FROM `$project_id.$dataset.tags` WHERE tag_id = $q_id
+        ) AS tag_exists
+    });
 
-    my $sql = qq{
-        SELECT COUNT(*) > 0 AS tag_exists
-        FROM `$project_id.$dataset.tags`
-        WHERE tag = '$tag_name' AND project = '$project'
-    };
-
-    my $result = $self->_run_bq_query($sql);
-    return $result->[0]{tag_exists} eq 'true' ? 1: 0;
+    return ($rows->[0]{tag_exists} // '') eq 'true' ? 1 : 0;
 }
 
 # Internal method to deploy a single tag
