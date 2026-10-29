@@ -1285,43 +1285,66 @@ sub change_id_for {
     my $project_id = $self->target->uri->host;
     my $dataset    = $self->registry;
     my $project    = $p{project} || $self->plan->project;
+    my $q_project  = $self->_quote($project);
+    my $changes    = "`$project_id.$dataset.changes`";
+    my $tags       = "`$project_id.$dataset.tags`";
 
-    # If we have a cange_id, just return it if it exists
-    if (defined $p{change_id}) {
-        my $sql = qq{
-            SELECT change_id FROM `$project_id.$dataset.changes`
-            WHERE change_id = '$p{change_id}' AND project = '$project'
-            LIMIT 1
-        };
-        my $result = $self->_run_bq_query($sql);
-        return $result->[0]{change_id} if @$result;
+    # Find by change ID.
+    if (my $cid = $p{change_id}) {
+        my $rows = $self->_run_bq_query(
+            "SELECT change_id FROM $changes WHERE change_id = " . $self->_quote($cid)
+        );
+        return $rows->[0]{change_id};
     }
 
-    # If we have atag, look it up
-    if (defined $p{tag}) {
-        my $sql = qq{
-            SELECT change_id FROM `$project_id.$dataset.tags`
-            WHERE tag = '$p{tag}' AND project = '$project'
-            LIMIT 1
-        };
-        my $result = $self->_run_bq_query($sql);
-        if (@$result) {
-            return $result->[0]{change_id};
+    if (my $change = $p{change}) {
+        my $q_change = $self->_quote($change);
+
+        if (my $tag = $p{tag}) {
+            # There is nothing before the first tag.
+            return undef if $tag eq 'ROOT';
+
+            my $sql;
+            if ($tag eq 'HEAD') {
+                # Latest version of the change.
+                $sql = "SELECT change_id FROM $changes
+                         WHERE project = $q_project AND change = $q_change
+                         ORDER BY committed_at DESC LIMIT 1";
+            } else {
+                # Latest version of the change committed at or before the tag.
+                $sql = "SELECT c.change_id FROM $changes c
+                          JOIN $tags t
+                            ON c.committed_at <= t.committed_at AND c.project = t.project
+                         WHERE c.project = $q_project AND c.change = $q_change
+                           AND t.tag = " . $self->_quote($tag) . "
+                         ORDER BY c.committed_at DESC LIMIT 1";
+            }
+            my $rows = $self->_run_bq_query($sql);
+            return $rows->[0]{change_id};
         }
+
+        # Find by change name only.
+        my $rows = $self->_run_bq_query(
+            "SELECT change_id FROM $changes
+              WHERE project = $q_project AND change = $q_change
+              ORDER BY committed_at ASC"
+        );
+        my @ids = map { $_->{change_id} } @$rows;
+        return $ids[0] if $p{first};
+        return $self->_handle_lookup_index($change, \@ids);
     }
 
-    # If we have a change name, look up its change_id (but not if it's empty)
-    if (defined $p{change} && $p{change} ne '') {
-        my $sql = qq{
-            SELECT change_id FROM `$project_id.$dataset.changes`
-            WHERE change = '$p{change}' AND project = '$project'
-            ORDER BY committed_at DESC LIMIT 1
-        };
-        my $result = $self->_run_bq_query($sql);
-        return $result->[0]{change_id} if @$result;
+    if (my $tag = $p{tag}) {
+        return $self->latest_change_id if $tag eq 'HEAD';
+        return $self->earliest_change_id(0, $project) if $tag eq 'ROOT';
+
+        my $rows = $self->_run_bq_query(
+            "SELECT change_id FROM $tags
+              WHERE project = $q_project AND tag = " . $self->_quote($tag) . " LIMIT 1"
+        );
+        return $rows->[0]{change_id};
     }
 
-    # If we get here, we couldn't find the change ID
     return undef;
 }
 
