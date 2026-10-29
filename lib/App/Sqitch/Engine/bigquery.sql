@@ -1,8 +1,13 @@
+-- Deploy Sqitch Registry to BigQuery
+-- Version 1.1
+
+-- Note: The dataset is created separately with location parameter
+-- This file only creates the tables within the dataset
 
 CREATE TABLE IF NOT EXISTS `:registry.releases` (
   version         NUMERIC NOT NULL OPTIONS(description='Version of the Sqitch registry.'),
   installed_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP() OPTIONS(description='Date the registry release was installed.'),
-  installer_name  STRING NOT NULL OPTIONS(descrption='Name of the user who installed the registry release.'),
+  installer_name  STRING NOT NULL OPTIONS(description='Name of the user who installed the registry release.'),
   installer_email STRING NOT NULL OPTIONS(description='Email address of the user who installed the registry release.'),
   PRIMARY KEY (version) NOT ENFORCED
 )
@@ -19,7 +24,7 @@ CREATE TABLE IF NOT EXISTS `:registry.projects` (
   PRIMARY KEY (project) NOT ENFORCED
 )
 OPTIONS (
-    descritpion = 'Sqitch projects deployed to this database.'
+    description = 'Sqitch projects deployed to this database.'
 );
 
 CREATE TABLE IF NOT EXISTS `:registry.changes` (
@@ -64,7 +69,7 @@ ALTER TABLE `:registry.tags` ADD CONSTRAINT fk_tags_project FOREIGN KEY (project
 ALTER TABLE `:registry.tags` ADD CONSTRAINT fk_tags_changes FOREIGN KEY (change_id) REFERENCES `:registry.changes` (change_id) NOT ENFORCED;
 
 CREATE TABLE IF NOT EXISTS `:registry.dependencies` (
-  change_id     STRING NOT NULL OPTIONS(description='ID of the deneding change.'),
+  change_id     STRING NOT NULL OPTIONS(description='ID of the depending change.'),
   type          STRING NOT NULL OPTIONS(description='Type of dependency.'),
   dependency    STRING NOT NULL OPTIONS(description='Dependency name.'),
   dependency_id STRING OPTIONS(description='Change ID the dependency resolves to.'),

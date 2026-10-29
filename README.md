@@ -33,6 +33,7 @@ sections.
 *   [Exasol][exa] 6.0+
 *   [Snowflake][flake]
 *   [ClickHouse][click] 25.8+
+*   [Google BigQuery][bq] (via the `bq` command-line tool)
 
 What makes it different from your typical migration approaches? A few things:
 
@@ -91,6 +92,41 @@ There have also been a number of presentations on Sqitch:
 * [Agile Database Development]: Slides from a three-hour tutorial session on
   using [Git], test-driven development with [pgTAP], and change management with
   Sqitch, updated in January, 2014.
+
+Google BigQuery
+---------------
+
+Sqitch supports Google BigQuery. It uses the `bq` command-line tool, so
+install the [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) and log in (`gcloud auth login`) before using it.
+
+The target URI is `db:bigquery://PROJECT_ID/DATASET?location=LOCATION`. The
+`location` parameter is required. `DATASET` is for your own objects; the Sqitch
+registry lives in a separate dataset named `sqitch` by default. To use another
+name:
+
+    sqitch config engine.bigquery.registry my_registry
+
+A minimal `sqitch.conf`:
+
+    [core]
+        engine = bigquery
+        target = bigquery
+
+    [target "bigquery"]
+        uri = db:bigquery://my-gcp-project/my_app?location=us-central1
+
+Limitations:
+
+*   BigQuery has no transactions, so a deploy that fails partway can leave a
+    change registered. Check with `sqitch status`.
+*   Every statement runs as a separate `bq` call, so deploys are slower than on
+    engines with a persistent connection.
+
+Planned: evaluating a persistent ODBC connection for the registry queries, to
+avoid starting a `bq` process for every statement.
+
+Details: `perldoc App::Sqitch::Engine::bigquery`. Unit tests (offline):
+`prove -Ilib t/bigquery.t`.
 
 Installation
 ------------
@@ -221,7 +257,8 @@ SOFTWARE.
   [vert]: https://www.vertica.com/
   [exa]: https://www.exasol.com/
   [flake]: https://www.snowflake.net/
-  [click]: https://clickhouse.com/clickhouse
+  [click]: https://clickhouse.com/
+  [bq]: https://cloud.google.com/bigquery/docs
   [SQL\*Plus]: https://www.orafaq.com/wiki/SQL*Plus
   [Merkle tree]: https://en.wikipedia.org/wiki/Merkle_tree "Wikipedia: “Merkle tree”"
   [gitmerkle]: https://stackoverflow.com/a/18589734/
