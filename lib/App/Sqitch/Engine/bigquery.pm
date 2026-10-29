@@ -695,6 +695,32 @@ sub search_events {
     };
 }
 
+# BigQuery has no transactions, so remove the registry rows a failed deploy may have written.
+sub _unregister_change {
+    my ($self, $change) = @_;
+    my $project_id = $self->target->uri->host;
+    my $dataset    = $self->registry;
+    my $change_id  = $change->id;
+
+    my $sql = qq{
+        DELETE FROM `$project_id.$dataset.tags`
+        WHERE change_id = '$change_id';
+
+        DELETE FROM `$project_id.$dataset.dependencies`
+        WHERE change_id = '$change_id';
+
+        DELETE FROM `$project_id.$dataset.changes`
+        WHERE change_id = '$change_id';
+    };
+
+    try {
+        $self->_run_bq_exec($sql);
+    } catch {
+        $self->sqitch->vent("Could not clean up the registry for change $change_id");
+    };
+    return $self;
+}
+
 # Run a deploy script
 sub deploy_change {
     my ($self, $change) = @_;
@@ -719,7 +745,7 @@ sub deploy_change {
             $sqitch->info('ok');
         } catch {
             $sqitch->vent(eval { $_->message } // $_);
-            $self->rollback_work($change);
+            $self->_unregister_change($change);
             try {
                 $self->begin_work($change);
                 $self->run_revert($change->revert_file) unless $self->log_only;

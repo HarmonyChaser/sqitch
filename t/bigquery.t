@@ -372,6 +372,15 @@ is $row->{planned_at}, undef, 'a missing planned_at should stay undef';
 is scalar($iter->()), undef, 'the iterator should end after the last change';
 $mock_reg->unmock_all;
 
+# Test _unregister_change (query is mocked)
+my $mock_unreg = Test::MockModule->new($CLASS);
+my @unreg_sql;
+$mock_unreg->mock(_run_bq_exec => sub { push @unreg_sql, $_[1]; 1 });
+$bq_with_uri->_unregister_change(FakeChange->new);
+like $unreg_sql[0], qr/DELETE FROM `test-project\.sqitch\.tags`\s+WHERE change_id = 'abc123'/, '_unregister_change should delete the change tags';
+like $unreg_sql[0], qr/DELETE FROM `test-project\.sqitch\.dependencies`/, '_unregister_change should delete the change dependencies';
+like $unreg_sql[0], qr/DELETE FROM `test-project\.sqitch\.changes`/, '_unregister_change should delete the change itself';
+$mock_unreg->unmock_all;
 
 ##############################################################################
 # Test 62: Test _initialized() method
