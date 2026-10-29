@@ -382,6 +382,26 @@ like $unreg_sql[0], qr/DELETE FROM `test-project\.sqitch\.dependencies`/, '_unre
 like $unreg_sql[0], qr/DELETE FROM `test-project\.sqitch\.changes`/, '_unregister_change should delete the change itself';
 $mock_unreg->unmock_all;
 
+# Test current_tags (query is mocked)
+my $mock_tags = Test::MockModule->new($CLASS);
+$mock_tags->mock(_run_bq_query => sub { [
+    {
+        tag_id => 't1', tag => 'v1.0',
+        committer_name => 'Ann', committer_email => 'ann@example.com',
+        committed_at => '2026-01-02 03:04:05',
+        planner_name => 'Bob', planner_email => 'bob@example.com',
+        planned_at => '2026-01-01 00:00:00',
+    },
+] });
+my $tag_iter = $bq_with_uri->current_tags('proj');
+my $tag_row  = $tag_iter->();
+is $tag_row->{tag}, 'v1.0', 'current_tags should return the tag name';
+isa_ok $tag_row->{committed_at}, 'App::Sqitch::DateTime', 'tag committed_at';
+isa_ok $tag_row->{planned_at}, 'App::Sqitch::DateTime', 'tag planned_at';
+is scalar($tag_iter->()), undef, 'the tag iterator should end after the last tag';
+$mock_tags->unmock_all;
+
+
 ##############################################################################
 # Test 62: Test _initialized() method
 subtest '_initialized method' => sub {

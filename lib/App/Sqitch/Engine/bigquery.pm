@@ -1438,30 +1438,36 @@ sub change_id_offset_from_id {
 }
 
 # Returns the tags associated with the current deployed change
+# Returns an iterator over the tags of a project, newest first.
 sub current_tags {
     my ($self, $project) = @_;
-
     my $project_id = $self->target->uri->host;
     my $dataset    = $self->registry;
-    $project       = $self->plan->project;
+    $project = $self->plan->project unless defined $project;
+    my $q_project  = $self->_quote($project);
 
-    # Get the most recent change
-    my $state = $self->current_state;
-    return [] unless $state;
-
-    my $change_id = $state->{change_id};
-
-    # Query tags for this change
     my $sql = qq{
-        SELECT tag
-        FROM `$project_id.$dataset.tags`
-        WHERE change_id = '$change_id' AND project = '$project'
-        ORDER BY committed_at
+        SELECT t.tag_id, t.tag, t.committer_name, t.committer_email,
+               FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', t.committed_at) AS committed_at,
+               t.planner_name, t.planner_email,
+               FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', t.planned_at) AS planned_at
+          FROM `$project_id.$dataset.tags` t
+         WHERE t.project = $q_project
+         ORDER BY t.committed_at DESC, t.tag DESC
     };
 
-    my $result = $self->_run_bq_query($sql);
-    return [ map { $_->{tag} } @$result ];
+    my $rows  = $self->_run_bq_query($sql);
+    my $index = 0;
+
+    return sub {
+        return if $index >= @$rows;
+        my $row = $rows->[$index++];
+        $row->{committed_at} = $self->_parse_timestamp($row->{committed_at});
+        $row->{planned_at}   = $self->_parse_timestamp($row->{planned_at});
+        return $row;
+    };
 }
+
 
 # Check if a tag is deployed
 sub is_deployed_tag {
