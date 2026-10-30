@@ -425,6 +425,18 @@ is $requiring[0]{change}, 'nine', 'changes_requiring_change should return the ch
 is $requiring[0]{asof_tag}, '@v2.0', 'changes_requiring_change should add the as-of tag';
 $mock_misc->unmock_all;
 
+# Test latest_change_id / earliest_change_id (query is mocked)
+my $mock_cid = Test::MockModule->new($CLASS);
+my @cid_sql;
+$mock_cid->mock(_run_bq_query => sub { push @cid_sql, $_[1]; [ { change_id => 'abc' } ] });
+is $bq_with_uri->latest_change_id(2, 'proj'), 'abc', 'latest_change_id should return the change ID';
+like $cid_sql[0], qr/ORDER BY committed_at DESC\s+LIMIT 1 OFFSET 2/, 'latest_change_id should order descending with the offset';
+is $bq_with_uri->earliest_change_id(0, 'proj'), 'abc', 'earliest_change_id should return the change ID';
+like $cid_sql[1], qr/ORDER BY committed_at ASC\s+LIMIT 1 OFFSET 0/, 'earliest_change_id should order ascending';
+$mock_cid->mock(_run_bq_query => sub { die "Not found: Dataset project:sqitch was not found" });
+is $bq_with_uri->latest_change_id(0, 'proj'), undef, 'latest_change_id should return undef when there is no registry';
+$mock_cid->unmock_all;
+
 ##############################################################################
 # Test 62: Test _initialized() method
 subtest '_initialized method' => sub {

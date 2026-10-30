@@ -354,7 +354,7 @@ sub are_deployed_changes {
     
     # Extract change IDs
     my @ids = map { $_->id } @changes;
-    my $in_clause = join(",", map {"'$_'"} @ids);
+    my $in_clause = join(",", map { $self->_quote($_) } @ids);
 
     my $sql = qq{
         SELECT change_id
@@ -500,50 +500,40 @@ sub deployed_changes_since {
     return map { $self->_change_hash($_) } @$rows;
 }
 
-# Returns the ID of the most recently deployed change.
+# Returns the ID of the most recently deployed change (optionally $offset steps back).
 sub latest_change_id {
-    my ($self, $offset) = @_;
-    my $project_id = $self->target->uri->host;
-    my $dataset    = $self->registry;
-    my $project    = $self->plan->project;
-    $offset ||= 0;
-
-    my $sql = qq{
-        SELECT change_id
-        FROM `$project_id.$dataset.changes`
-        WHERE project = '$project'
-        ORDER BY committed_at DESC
-        LIMIT 1 OFFSET $offset
-    };
-
-    my $rows = $self->_run_bq_query($sql);
-    return $rows->[0]->{change_id} if @$rows;
-    return undef;
+    my ($self, $offset, $project) = @_;
+    return $self->_cid('DESC', $offset, $project);
 }
 
-# Returns the ID of the earliest deployed change.
-# Used by Sqitch log command to determine starting point.
+# Returns the ID of the earliest deployed change (optionally $offset steps forward).
 sub earliest_change_id {
     my ($self, $offset, $project) = @_;
+    return $self->_cid('ASC', $offset, $project);
+}
 
+# Returns the ID of the change at a position in commit order, or undef (also if there is no registry yet).
+sub _cid {
+    my ($self, $ord, $offset, $project) = @_;
     my $project_id = $self->target->uri->host;
-    my $dataset = $self->registry;
-    $project  ||= $self->plan->project;
+    my $dataset    = $self->registry;
+    $project       = $self->plan->project unless defined $project && length $project;
+    my $q_project  = $self->_quote($project);
+    $offset        = int($offset || 0);
 
-    my $offset_clause = defined $offset ? "OFFSET $offset" : '';
-
-    my $sql = qq{
-        SELECT change_id
-        FROM `$project_id.$dataset.changes`
-        WHERE project = '$project'
-        ORDER BY committed_at ASC
-        LIMIT 1
-        $offset_clause
+    my $rows = try {
+        $self->_run_bq_query(qq{
+            SELECT change_id
+              FROM `$project_id.$dataset.changes`
+             WHERE project = $q_project
+             ORDER BY committed_at $ord
+             LIMIT 1 OFFSET $offset
+        });
+    } catch {
+        return [] if /Not\s+found:\s+(?:Dataset|Table)/;
+        die $_;
     };
-
-    my $result = $self->_run_bq_query($sql);
-    return $result->[0]->{change_id} if @$result;
-    return undef;
+    return $rows->[0]{change_id};
 }
 
 # Searches the events table with various filters and returns an iterator
@@ -1392,44 +1382,6 @@ sub is_deployed_tag {
     });
 
     return ($rows->[0]{tag_exists} // '') eq 'true' ? 1 : 0;
-}
-
-# Internal method to deploy a single tag
-sub _deploy_tag {
-    my ($self, $tag, $change_id) = @_;
-
-    my $project_id = $self->target->uri->host;
-    my $dataset    = $self->registry;
-    my $tags_table = "`$project_id.$dataset.tags`";
-    my $project    = $self->plan->project;
-    my $user       = $self->sqitch->user_name;
-    my $email      = $self->sqitch->user_email;
-
-    my $tag_id        = $tag->id;
-    my $tag_name      = $tag->name;
-    my $note          = $tag->note;
-    my $planned_at    = $tag->timestamp;
-    my $planner       = $tag->planner_name;
-    my $planner_email = $tag->planner_email;
-
-    $self->sqitch->debug("Deploying tag $tag_name");
-
-    my $sql = qq{
-        INSERT INTO $tags_table (
-            tag_id, tag, project, change_id, note, committed_at,
-            committer_name, committer_email, planned_at, planner_name, planner_email
-        ) VALUES (
-            '$tag_id', '$tag_name', '$project', '$change_id', '$note', CURRENT_TIMESTAMP(),
-            '$user', '$email', '$planned_at', '$planner', '$planner_email'
-        )
-    };
-
-    try {
-        $self->_run_bq_exec($sql);
-        $self->sqitch->info("Tagged $tag_name");
-    } catch {
-        hurl engine => "Error deploying tag $tag_name: $_";
-    };
 }
 
 # Save tags in the database when they're deployed
