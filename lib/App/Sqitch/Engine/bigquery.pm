@@ -354,7 +354,7 @@ sub are_deployed_changes {
     
     # Extract change IDs
     my @ids = map { $_->id } @changes;
-    my $in_clause = join(",", map {"'$_'"} @ids);
+    my $in_clause = join(",", map { $self->_quote($_) } @ids);
 
     my $sql = qq{
         SELECT change_id
@@ -388,89 +388,43 @@ sub is_deployed_change {
     return ($result->[0]{change_exists} // '') eq 'true' ? 1 : 0;
 }
 
-# load_changes
-# Loads all deployed changes from the changes table and returns them as Change objects.
-sub load_changes {
-    my $self = shift;
-    my $project = $self->target->uri->host;
-    my $dataset = $self->registry;
-
-    my $sql = qq{
-        SELECT change_id, change, project, note, committed_at, committer_name, committer_email, planned_at,
-        planner_name, planner_email, script_hash
-        FROM `$project.$dataset.changes`
-        ORDER BY committed_at
+# Builds the hash that Sqitch expects for a deployed change (same keys as deployed_changes).
+sub _change_hash {
+    my ($self, $row) = @_;
+    return +{
+        id            => $row->{id},
+        name          => $row->{name},
+        project       => $row->{project},
+        note          => $row->{note},
+        timestamp     => $self->_parse_timestamp($row->{timestamp}),
+        planner_name  => $row->{planner_name},
+        planner_email => $row->{planner_email},
+        script_hash   => $row->{script_hash},
+        tags          => $row->{tags} ? [ split / / => $row->{tags} ] : [],
     };
-
-    my $rows = $self->_run_bq_query($sql);
-
-    return map {
-        App::Sqitch::Plan::Change->new(
-            name            => $_->{change},
-            id              => $_->{change_id},
-            project         => $_->{project},
-            note            => $_->{note},
-            timestamp       => $self->_parse_timestamp($_->{committed_at}),
-            committer_name  => $_->{committer_name},
-            committer_email => $_->{committer_email},
-            planner_name    => $_->{planner_name},
-            planner_email   => $_->{planner_email},
-            planned_at      => $self->_parse_timestamp($_->{planned_at}),
-            script_hash     => $_->{script_hash},
-            plan            => $self->plan,
-        )
-    } @$rows;
 }
 
-# load_change
-# Loads a single deployed change by ID
+# Returns a hash of the data for a deployed change, or undef if it is not deployed.
 sub load_change {
     my ($self, $change_id) = @_;
-    my $project = $self->target->uri->host;
-    my $dataset = $self->registry;
+    my $project_id = $self->target->uri->host;
+    my $dataset    = $self->registry;
+    my $q_id       = $self->_quote($change_id);
 
-    my $sql = qq{
-        SELECT change_id, change, project, note, committed_at,
-               committer_name, committer_email, planned_at,
-               planner_name, planner_email, script_hash
-        FROM `$project.$dataset.changes`
-        WHERE change_id = '$change_id'
-        LIMIT 1
-    };
+    my $rows = $self->_run_bq_query(qq{
+        SELECT c.change_id AS id, c.change AS name, c.project, c.note,
+               FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', c.planned_at) AS timestamp,
+               c.planner_name, c.planner_email, c.script_hash,
+               STRING_AGG(t.tag, ' ' ORDER BY t.tag) AS tags
+          FROM `$project_id.$dataset.changes` c
+          LEFT JOIN `$project_id.$dataset.tags` t ON c.change_id = t.change_id
+         WHERE c.change_id = $q_id
+         GROUP BY c.change_id, c.change, c.project, c.note, c.planned_at,
+                  c.planner_name, c.planner_email, c.script_hash
+    });
 
-    my $rows = $self->_run_bq_query($sql);
-
-    unless (@$rows) {
-        return;
-    }
-
-    my $row = $rows->[0];
-
-    # Parse timestamps
-    my $committed_at = $self->_parse_timestamp($row->{committed_at});
-    my $planned_at   = $self->_parse_timestamp($row->{planned_at});
-
-    return App::Sqitch::Plan::Change->new(
-        name            => $row->{change},
-        id              => $row->{change_id},
-        project         => $row->{project},
-        note            => $row->{note},
-        timestamp       => $committed_at,
-        committer_name  => $row->{committer_name},
-        committer_email => $row->{committer_email},
-        planner_name    => $row->{planner_name},
-        planner_email   => $row->{planner_email},
-        planned_at      => $planned_at,
-        script_hash     => $row->{script_hash},
-        plan            => $self->plan,
-    );
-}
-
-# Returns a Change object for a given change ID by delegating to load_change().
-# This is used by Sqitch to resolve deployed change IDs to full change metadta.
-sub change_for_id {
-    my ($self, $change_id) = @_;
-    return $self->load_change($change_id);
+    my $row = $rows->[0] or return undef;
+    return $self->_change_hash($row);
 }
 
 # Returns a list of deployed changes as hashrefs of deployment.
@@ -524,87 +478,62 @@ sub deployed_changes_since {
 
     my $project_id = $self->target->uri->host;
     my $dataset    = $self->registry;
-    my $project    = $self->plan->project;
+    my $q_project  = $self->_quote($self->plan->project);
+    my $q_id       = $self->_quote(ref $change ? $change->id : $change);
 
-    my $change_id  = ref $change ? $change->id : $change;
+    my $rows = $self->_run_bq_query(qq{
+        SELECT c.change_id AS id, c.change AS name, c.project, c.note,
+               FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', c.planned_at) AS timestamp,
+               c.planner_name, c.planner_email, c.script_hash,
+               STRING_AGG(t.tag, ' ' ORDER BY t.tag) AS tags
+          FROM `$project_id.$dataset.changes` c
+          LEFT JOIN `$project_id.$dataset.tags` t ON c.change_id = t.change_id
+         WHERE c.project = $q_project
+           AND c.committed_at > (
+               SELECT committed_at FROM `$project_id.$dataset.changes` WHERE change_id = $q_id
+           )
+         GROUP BY c.change_id, c.change, c.project, c.note, c.planned_at,
+                  c.planner_name, c.planner_email, c.committed_at, c.script_hash
+         ORDER BY c.committed_at ASC
+    });
 
-    # Get all changes deployed after the target change
-    my $sql = qq{
-        SELECT c.change_id AS id, c.change AS name, c.project, c.note, 
-               c.planned_at AS timestamp, c.planner_name, c.planner_email,
-               c.script_hash
-        FROM `$project_id.$dataset.changes` c
-        WHERE c.project = '$project'
-          AND c.committed_at > (
-              SELECT committed_at 
-              FROM `$project_id.$dataset.changes` 
-              WHERE change_id = '$change_id' AND project = '$project'
-          )
-        ORDER BY c.committed_at ASC
-    };
-
-    my $rows = $self->_run_bq_query($sql);
-
-    # Return as hashrefs with tags
-    return map {
-        +{
-            id            => $_->{id},
-            name          => $_->{name},
-            project       => $_->{project},
-            note          => $_->{note},
-            timestamp     => $self->_parse_timestamp($_->{timestamp}),
-            planner_name  => $_->{planner_name},
-            planner_email => $_->{planner_email},
-            script_hash   => $_->{script_hash},
-            tags          => [], # Tags not retrieved here
-        }
-    } @$rows;
+    return map { $self->_change_hash($_) } @$rows;
 }
 
-# Returns the ID of the most recently deployed change.
+# Returns the ID of the most recently deployed change (optionally $offset steps back).
 sub latest_change_id {
-    my ($self, $offset) = @_;
-    my $project_id = $self->target->uri->host;
-    my $dataset    = $self->registry;
-    my $project    = $self->plan->project;
-    $offset ||= 0;
-
-    my $sql = qq{
-        SELECT change_id
-        FROM `$project_id.$dataset.changes`
-        WHERE project = '$project'
-        ORDER BY committed_at DESC
-        LIMIT 1 OFFSET $offset
-    };
-
-    my $rows = $self->_run_bq_query($sql);
-    return $rows->[0]->{change_id} if @$rows;
-    return undef;
+    my ($self, $offset, $project) = @_;
+    return $self->_cid('DESC', $offset, $project);
 }
 
-# Returns the ID of the earliest deployed change.
-# Used by Sqitch log command to determine starting point.
+# Returns the ID of the earliest deployed change (optionally $offset steps forward).
 sub earliest_change_id {
     my ($self, $offset, $project) = @_;
+    return $self->_cid('ASC', $offset, $project);
+}
 
+# Returns the ID of the change at a position in commit order, or undef (also if there is no registry yet).
+sub _cid {
+    my ($self, $ord, $offset, $project) = @_;
     my $project_id = $self->target->uri->host;
-    my $dataset = $self->registry;
-    $project  ||= $self->plan->project;
+    my $dataset    = $self->registry;
+    $project       = $self->plan->project unless defined $project && length $project;
+    my $q_project  = $self->_quote($project);
+    $offset        = int($offset || 0);
 
-    my $offset_clause = defined $offset ? "OFFSET $offset" : '';
-
-    my $sql = qq{
-        SELECT change_id
-        FROM `$project_id.$dataset.changes`
-        WHERE project = '$project'
-        ORDER BY committed_at ASC
-        LIMIT 1
-        $offset_clause
+    my $rows = try {
+        $self->_run_bq_query(qq{
+            SELECT change_id
+              FROM `$project_id.$dataset.changes`
+             WHERE project = $q_project
+             ORDER BY committed_at $ord
+             LIMIT 1 OFFSET $offset
+        });
+    } catch {
+        return [] if /Not\s+found:\s+(?:Dataset|Table)/;
+        die $_;
     };
-
-    my $result = $self->_run_bq_query($sql);
-    return $result->[0]->{change_id} if @$result;
-    return undef;
+    return $rows->[0]{change_id};
 }
 
 # Searches the events table with various filters and returns an iterator
@@ -789,35 +718,36 @@ sub log_fail_change {
 # Returns a list of changes that depend on a specified change, by querying the dependencies table in the BigQuery datase defined by the engine's configuration.
 sub changes_requiring_change {
     my ($self, $change) = @_;
-    my $change_id = $change->id;
 
-    # Build fully qualified table name
-    # Extract project and dataset from the target URI
     my $project_id = $self->target->uri->host;
     my $dataset    = $self->registry;
-    my $table      = "$project_id.$dataset.dependencies";
+    my $changes    = "`$project_id.$dataset.changes`";
+    my $tags       = "`$project_id.$dataset.tags`";
+    my $q_id       = $self->_quote($change->id);
 
-    # Construct the SQL query
-    my $sql = qq{
-        SELECT change_id
-        FROM `$table`
-        WHERE dependency_id = '$change_id'
-        ORDER BY change_id
-    };
+    my $rows = $self->_run_bq_query(qq{
+        SELECT c.change_id, c.project, c.change
+          FROM `$project_id.$dataset.dependencies` d
+          JOIN $changes c ON c.change_id = d.change_id
+         WHERE d.dependency_id = $q_id
+    });
 
-    # Run the query
-    my $results = $self->_run_bq_query($sql);
-
-    # Parse results into Change objects
-    my @changes;
-    for my $row (@$results) {
-        push @changes, App::Sqitch::Plan::Change->new(
-            id   => $row->{change_id},
-            plan => $self->plan,
-        );
+    # Add the first tag applied at or after each dependent change (asof_tag).
+    for my $row (@$rows) {
+        my $q_cid = $self->_quote($row->{change_id});
+        my $tag_rows = $self->_run_bq_query(qq{
+            SELECT CONCAT('\@', t.tag) AS asof_tag
+              FROM $changes c2
+              JOIN $tags t ON c2.change_id = t.change_id
+             WHERE c2.project = (SELECT project FROM $changes WHERE change_id = $q_cid)
+               AND c2.committed_at >= (SELECT committed_at FROM $changes WHERE change_id = $q_cid)
+             ORDER BY c2.committed_at ASC, t.tag ASC
+             LIMIT 1
+        });
+        $row->{asof_tag} = $tag_rows->[0]{asof_tag};
     }
 
-    return @changes;
+    return @$rows;
 }
 
 # Removes a deployed change from the Sqitch registry by deleting its record from the changes table.
@@ -1113,42 +1043,6 @@ sub registry_change {
     return $self;
 }
 
-# Get a change by name
-sub get_change {
-    my ($self, $name) = @_;
-    my $project = $self->target->uri->host;
-    my $dataset = $self->registry;
-
-    my $sql = qq{
-        SELECT change_id, change, project, note, committed_at,
-               committer_name, committer_email, planned_at,
-               planner_name, planner_email, script_hash
-        FROM `$project.$dataset.changes`
-        WHERE change = '$name'
-        ORDER BY committed_at DESC
-        LIMIT 1
-    };
-
-    my $rows = $self->_run_bq_query($sql);
-    return unless @$rows;
-
-    my $row = $rows->[0];
-    return App::Sqitch::Plan::Change->new(
-        name           => $row->{change},
-        id             => $row->{change_id},
-        project        => $row->{project},
-        note           => $row->{note},
-        timestamp      => $self->_parse_timestamp($row->{committed_at}),
-        committer_name => $row->{committer_name},
-        committer_email=> $row->{committer_email},
-        planner_name   => $row->{planner_name},
-        planner_email  => $row->{planner_email},
-        planned_at     => $self->_parse_timestamp($row->{planned_at}),
-        script_hash    => $row->{script_hash},
-        plan           => $self->plan,
-    );
-}
-
 # Throw an error when a change doesn't exist
 sub fail_on_no_change {
     my ($self, $change) = @_;
@@ -1285,43 +1179,66 @@ sub change_id_for {
     my $project_id = $self->target->uri->host;
     my $dataset    = $self->registry;
     my $project    = $p{project} || $self->plan->project;
+    my $q_project  = $self->_quote($project);
+    my $changes    = "`$project_id.$dataset.changes`";
+    my $tags       = "`$project_id.$dataset.tags`";
 
-    # If we have a cange_id, just return it if it exists
-    if (defined $p{change_id}) {
-        my $sql = qq{
-            SELECT change_id FROM `$project_id.$dataset.changes`
-            WHERE change_id = '$p{change_id}' AND project = '$project'
-            LIMIT 1
-        };
-        my $result = $self->_run_bq_query($sql);
-        return $result->[0]{change_id} if @$result;
+    # Find by change ID.
+    if (my $cid = $p{change_id}) {
+        my $rows = $self->_run_bq_query(
+            "SELECT change_id FROM $changes WHERE change_id = " . $self->_quote($cid)
+        );
+        return $rows->[0]{change_id};
     }
 
-    # If we have atag, look it up
-    if (defined $p{tag}) {
-        my $sql = qq{
-            SELECT change_id FROM `$project_id.$dataset.tags`
-            WHERE tag = '$p{tag}' AND project = '$project'
-            LIMIT 1
-        };
-        my $result = $self->_run_bq_query($sql);
-        if (@$result) {
-            return $result->[0]{change_id};
+    if (my $change = $p{change}) {
+        my $q_change = $self->_quote($change);
+
+        if (my $tag = $p{tag}) {
+            # There is nothing before the first tag.
+            return undef if $tag eq 'ROOT';
+
+            my $sql;
+            if ($tag eq 'HEAD') {
+                # Latest version of the change.
+                $sql = "SELECT change_id FROM $changes
+                         WHERE project = $q_project AND change = $q_change
+                         ORDER BY committed_at DESC LIMIT 1";
+            } else {
+                # Latest version of the change committed at or before the tag.
+                $sql = "SELECT c.change_id FROM $changes c
+                          JOIN $tags t
+                            ON c.committed_at <= t.committed_at AND c.project = t.project
+                         WHERE c.project = $q_project AND c.change = $q_change
+                           AND t.tag = " . $self->_quote($tag) . "
+                         ORDER BY c.committed_at DESC LIMIT 1";
+            }
+            my $rows = $self->_run_bq_query($sql);
+            return $rows->[0]{change_id};
         }
+
+        # Find by change name only.
+        my $rows = $self->_run_bq_query(
+            "SELECT change_id FROM $changes
+              WHERE project = $q_project AND change = $q_change
+              ORDER BY committed_at ASC"
+        );
+        my @ids = map { $_->{change_id} } @$rows;
+        return $ids[0] if $p{first};
+        return $self->_handle_lookup_index($change, \@ids);
     }
 
-    # If we have a change name, look up its change_id (but not if it's empty)
-    if (defined $p{change} && $p{change} ne '') {
-        my $sql = qq{
-            SELECT change_id FROM `$project_id.$dataset.changes`
-            WHERE change = '$p{change}' AND project = '$project'
-            ORDER BY committed_at DESC LIMIT 1
-        };
-        my $result = $self->_run_bq_query($sql);
-        return $result->[0]{change_id} if @$result;
+    if (my $tag = $p{tag}) {
+        return $self->latest_change_id if $tag eq 'HEAD';
+        return $self->earliest_change_id(0, $project) if $tag eq 'ROOT';
+
+        my $rows = $self->_run_bq_query(
+            "SELECT change_id FROM $tags
+              WHERE project = $q_project AND tag = " . $self->_quote($tag) . " LIMIT 1"
+        );
+        return $rows->[0]{change_id};
     }
 
-    # If we get here, we couldn't find the change ID
     return undef;
 }
 
@@ -1330,111 +1247,93 @@ sub change_id_for {
 sub change_offset_from_id {
     my ($self, $change_id, $offset) = @_;
 
+    # Just return the change if there is no offset.
+    return $self->load_change($change_id) unless $offset;
+
+    # Are we offset forwards or backwards?
+    my ($dir, $op) = $offset > 0 ? ('ASC', '>') : ('DESC', '<');
+    my $skip       = abs($offset) - 1;
+
     my $project_id = $self->target->uri->host;
     my $dataset    = $self->registry;
-    my $project    = $self->plan->project;
+    my $q_project  = $self->_quote($self->plan->project);
+    my $q_id       = $self->_quote($change_id);
 
-    # Get all changes ordered by committed_at
-    my $sql = qq{
-        SELECT change_id, change, committed_at
-        FROM `$project_id.$dataset.changes`
-        WHERE project = '$project'
-        ORDER BY committed_at
-    };
+    my $rows = $self->_run_bq_query(qq{
+        SELECT c.change_id AS id, c.change AS name, c.project, c.note,
+               FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', c.planned_at) AS timestamp,
+               c.planner_name, c.planner_email, c.script_hash,
+               STRING_AGG(t.tag, ' ' ORDER BY t.tag) AS tags
+          FROM `$project_id.$dataset.changes` c
+          LEFT JOIN `$project_id.$dataset.tags` t ON c.change_id = t.change_id
+         WHERE c.project = $q_project
+           AND c.committed_at $op (
+               SELECT committed_at FROM `$project_id.$dataset.changes` WHERE change_id = $q_id
+           )
+         GROUP BY c.change_id, c.change, c.project, c.note, c.planned_at,
+                  c.planner_name, c.planner_email, c.committed_at, c.script_hash
+         ORDER BY c.committed_at $dir
+         LIMIT 1 OFFSET $skip
+    });
 
-    my $changes = $self->_run_bq_query($sql);
-
-    # Find the index of the target change
-    my $target_idx = -1;
-    for my $i (0..$#{$changes}) {
-        if ($changes->[$i]{change_id} eq $change_id) {
-            $target_idx = $i;
-            last;
-        }
-    }
-
-    return undef if $target_idx == -1;  # Change not found
-
-    # Calculate the offset index
-    my $offset_idx = $target_idx + $offset;
-
-    # Check bounds
-    return undef if $offset_idx < 0 || $offset_idx > $#{$changes};
-
-    # Return the change at the ofset
-    return $self->load_change($changes->[$offset_idx]{change_id});
+    my $row = $rows->[0] or return undef;
+    return $self->_change_hash($row);
 }
 
 # Returns the tag-qualified name of a change (e.g., "create_users@v1.0" or "create_users@HEAD")
 sub name_for_change_id {
     my ($self, $change_id) = @_;
-
-    my $change = $self->load_change($change_id);
-    return undef unless $change;
-
-    my $change_name = $change->name;
-
-    # Get tags for this change
     my $project_id = $self->target->uri->host;
     my $dataset    = $self->registry;
-    my $project    = $self->plan->project;
+    my $changes    = "`$project_id.$dataset.changes`";
+    my $tags       = "`$project_id.$dataset.tags`";
+    my $q_id       = $self->_quote($change_id);
 
-    my $sql = qq{
-        SELECT tag
-        FROM `$project_id.$dataset.tags`
-        WHERE change_id = '$change_id' AND project = '$project'
-        ORDER BY committed_at DESC
-        LIMIT 1
-    };
+    my $rows = $self->_run_bq_query("SELECT change FROM $changes WHERE change_id = $q_id");
+    my $name = $rows->[0]{change};
+    return undef unless defined $name;
 
-    my $result = $self->_run_bq_query($sql);
-
-    if (@$result && $result->[0]{tag}) {
-        # Return change name with tag
-        return $change_name . '@' . $result->[0]{tag};
-    } else {
-        # Return change name with @HEAD
-        return $change_name . '@HEAD';
-    }
+    # The first tag applied at or after this change, else @HEAD.
+    $rows = $self->_run_bq_query(qq{
+         SELECT CONCAT('\@', t.tag) AS tag
+          FROM $changes c2
+          JOIN $tags t ON c2.change_id = t.change_id
+         WHERE c2.project = (SELECT project FROM $changes WHERE change_id = $q_id)
+           AND c2.committed_at >= (SELECT committed_at FROM $changes WHERE change_id = $q_id)
+         ORDER BY c2.committed_at ASC, t.tag ASC
+         LIMIT 1
+    });
+    return $name . ($rows->[0]{tag} // '@HEAD');
 }
+
 
 # Like change_offset_from_id() but returns just the change ID instead of the full object
 sub change_id_offset_from_id {
     my ($self, $change_id, $offset) = @_;
 
+    # Just return the ID if there is no offset.
+    return $change_id unless $offset;
+
+    my ($dir, $op) = $offset > 0 ? ('ASC', '>') : ('DESC', '<');
+    my $skip       = abs($offset) - 1;
+
     my $project_id = $self->target->uri->host;
     my $dataset    = $self->registry;
-    my $project    = $self->plan->project;
+    my $q_project  = $self->_quote($self->plan->project);
+    my $q_id       = $self->_quote($change_id);
 
-    # Get all changes ordered by committed_at
-    my $sql = qq{
+    my $rows = $self->_run_bq_query(qq{
         SELECT change_id
-        FROM `$project_id.$dataset.changes`
-        WHERE project = '$project'
-        ORDER BY committed_at
-    };
+          FROM `$project_id.$dataset.changes`
+         WHERE project = $q_project
+           AND committed_at $op (
+               SELECT committed_at FROM `$project_id.$dataset.changes` WHERE change_id = $q_id
+           )
+         ORDER BY committed_at $dir
+         LIMIT 1 OFFSET $skip
+    });
 
-    my $changes = $self->_run_bq_query($sql);
-
-    # Find the index of the target change
-    my $target_idx = -1;
-    for my $i (0..$#{$changes}) {
-        if ($changes->[$i]{change_id} eq $change_id) {
-            $target_idx = $i;
-            last;
-        }
-    }
-
-    return undef if $target_idx == -1;  # Change not found
-
-    # Calculate the offset index
-    my $offset_idx = $target_idx + $offset;
-
-    # Check bounds
-    return undef if $offset_idx < 0 || $offset_idx > $#{$changes};
-
-    # Return just the change ID at the ofset
-    return $changes->[$offset_idx]{change_id};
+    return $rows->[0]{change_id};
 }
 
 # Returns the tags associated with the current deployed change
@@ -1468,63 +1367,21 @@ sub current_tags {
     };
 }
 
-
 # Check if a tag is deployed
 sub is_deployed_tag {
     my ($self, $tag) = @_;
 
     my $project_id = $self->target->uri->host;
     my $dataset    = $self->registry;
-    my $project    = $self->plan->project;
+    my $q_id       = $self->_quote($tag->id);
 
-    my $tag_name = ref $tag ? $tag->name : $tag;
+    my $rows = $self->_run_bq_query(qq{
+        SELECT EXISTS(
+            SELECT 1 FROM `$project_id.$dataset.tags` WHERE tag_id = $q_id
+        ) AS tag_exists
+    });
 
-    my $sql = qq{
-        SELECT COUNT(*) > 0 AS tag_exists
-        FROM `$project_id.$dataset.tags`
-        WHERE tag = '$tag_name' AND project = '$project'
-    };
-
-    my $result = $self->_run_bq_query($sql);
-    return $result->[0]{tag_exists} eq 'true' ? 1: 0;
-}
-
-# Internal method to deploy a single tag
-sub _deploy_tag {
-    my ($self, $tag, $change_id) = @_;
-
-    my $project_id = $self->target->uri->host;
-    my $dataset    = $self->registry;
-    my $tags_table = "`$project_id.$dataset.tags`";
-    my $project    = $self->plan->project;
-    my $user       = $self->sqitch->user_name;
-    my $email      = $self->sqitch->user_email;
-
-    my $tag_id        = $tag->id;
-    my $tag_name      = $tag->name;
-    my $note          = $tag->note;
-    my $planned_at    = $tag->timestamp;
-    my $planner       = $tag->planner_name;
-    my $planner_email = $tag->planner_email;
-
-    $self->sqitch->debug("Deploying tag $tag_name");
-
-    my $sql = qq{
-        INSERT INTO $tags_table (
-            tag_id, tag, project, change_id, note, committed_at,
-            committer_name, committer_email, planned_at, planner_name, planner_email
-        ) VALUES (
-            '$tag_id', '$tag_name', '$project', '$change_id', '$note', CURRENT_TIMESTAMP(),
-            '$user', '$email', '$planned_at', '$planner', '$planner_email'
-        )
-    };
-
-    try {
-        $self->_run_bq_exec($sql);
-        $self->sqitch->info("Tagged $tag_name");
-    } catch {
-        hurl engine => "Error deploying tag $tag_name: $_";
-    };
+    return ($rows->[0]{tag_exists} // '') eq 'true' ? 1 : 0;
 }
 
 # Save tags in the database when they're deployed
